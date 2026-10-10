@@ -1,0 +1,811 @@
+diff --git a/.env.example b/.env.example
+index 5a5b3c9..f85160e 100644
+--- a/.env.example
++++ b/.env.example
+@@ -63,3 +63,10 @@ PROMPT_USER_KEY_SECRET=
+ PROMPT_CACHE_TTL_SECONDS=300
+ PROMPT_CONFIRMATION_TTL_SECONDS=600
+ PROMPT_ROUTER_CONFIDENCE_THRESHOLD=0.75
++
++# File MCP (permanent key is server-only; worker gets short-lived delegated sessions)
++FILE_MCP_ENABLED=false
++FILE_MCP_URL=
++FILE_MCP_API_KEY=
++FILE_MCP_ALLOW_USERS=
++FILE_MCP_TOOLS=drive_list_roots,drive_list_files,drive_get_file,drive_read_file
+diff --git a/src/server/file-mcp/delegation.ts b/src/server/file-mcp/delegation.ts
+new file mode 100644
+index 0000000..0d08843
+--- /dev/null
++++ b/src/server/file-mcp/delegation.ts
+@@ -0,0 +1,19 @@
++import "server-only";
++import { z } from "zod";
++import catalog from "../../worker/capabilities/file-mcp-catalog.json";
++/** Only a selected Telegram user gets a short-lived MCP session. Never pass the permanent key to the worker. */
++export async function fileMcpWorkerEnvironment(userId:string,env:Record<string,string|undefined>=process.env,request:typeof fetch=fetch):Promise<Record<string,string>>{
++  const disabled={FILE_MCP_ENABLED:"false"};
++  if(env.FILE_MCP_ENABLED!=="true")return disabled;
++  const allowed=(env.FILE_MCP_ALLOW_USERS??"").split(",").map(value=>value.trim());if(!allowed.includes(userId))return disabled;
++  const selected=(env.FILE_MCP_TOOLS??"").split(",").map(value=>value.trim()).filter(Boolean);
++  if(!selected.length||selected.some(name=>!catalog.some(tool=>tool.name===name)))throw new Error("FILE_MCP_TOOLS_INVALID");
++  const url=new URL(env.FILE_MCP_URL??"");
++  if((url.protocol!=="https:"&&!(url.protocol==="http:"&&url.hostname==="localhost"&&!env.VERCEL))||url.pathname!=="/api/mcp"||url.username||url.password||url.search||url.hash)throw new Error("FILE_MCP_URL_INVALID");
++  if(!env.FILE_MCP_API_KEY||!/^[A-Za-z0-9_-]{43}$/.test(env.FILE_MCP_API_KEY))throw new Error("FILE_MCP_API_KEY_INVALID");
++  const endpoint=new URL("/api/delegations",url);
++  const response=await request(endpoint,{method:"POST",headers:{authorization:`Bearer ${env.FILE_MCP_API_KEY}`,"content-type":"application/json"},body:JSON.stringify({tools:selected,ttlSeconds:300}),signal:AbortSignal.timeout(10_000),redirect:"error",cache:"no-store"});
++  if(!response.ok){await response.body?.cancel();throw new Error("FILE_MCP_DELEGATION_UNAVAILABLE");}
++  const session=z.object({token:z.string().regex(/^[A-Za-z0-9_-]{43}$/),expiresAt:z.string()}).parse(await response.json());
++  return {FILE_MCP_ENABLED:"true",FILE_MCP_URL:url.href,FILE_MCP_TOOLS:selected.join(","),FILE_MCP_SESSION:session.token};
++}
+diff --git a/src/server/telegram/dispatch.ts b/src/server/telegram/dispatch.ts
+index f03a93e..7b4b46b 100644
+--- a/src/server/telegram/dispatch.ts
++++ b/src/server/telegram/dispatch.ts
+@@ -1,3 +1,4 @@
++import { fileMcpWorkerEnvironment } from "../file-mcp/delegation";
+ import "server-only";
+ 
+ import { readFile } from "node:fs/promises";
+@@ -539,7 +540,7 @@ export async function dispatchTelegramInput(
+       degradationNotices: [...new Set(degradationNotices)],
+       rawTelegramInput: input.text,
+     },
+-    workerEnvironment(telegram.TELEGRAM_BOT_TOKEN, model),
++    { ...workerEnvironment(telegram.TELEGRAM_BOT_TOKEN, model), ...(input.chatScope === "private" ? await fileMcpWorkerEnvironment(input.userId) : { FILE_MCP_ENABLED: "false" }) },
+   );
+ }
+ 
+diff --git a/src/shared/capabilities.ts b/src/shared/capabilities.ts
+index fb9639c..ae79917 100644
+--- a/src/shared/capabilities.ts
++++ b/src/shared/capabilities.ts
+@@ -4,6 +4,22 @@ export const allowedCapabilityIds = [
+   "telegram.reply",
+   "http.fetch",
+   "network.http",
++  "drive_list_roots",
++  "drive_list_files",
++  "drive_get_file",
++  "drive_read_file",
++  "drive_create_folder",
++  "drive_create_folder_path",
++  "drive_create_file",
++  "drive_update_file",
++  "drive_begin_upload",
++  "drive_transfer_status",
++  "drive_complete_upload",
++  "drive_begin_download",
++  "drive_read_download_chunk",
++  "drive_create_native_file",
++  "drive_read_native_file",
++  "drive_write_native_file",
+ ] as const;
+ export type CapabilityId = (typeof allowedCapabilityIds)[number];
+ 
+diff --git a/src/worker/capabilities/file-mcp-catalog.json b/src/worker/capabilities/file-mcp-catalog.json
+new file mode 100644
+index 0000000..5dc609d
+--- /dev/null
++++ b/src/worker/capabilities/file-mcp-catalog.json
+@@ -0,0 +1,636 @@
++[
++  {
++    "name": "drive_list_roots",
++    "description": "List this client's approved root folders and read/write grants.",
++    "inputSchema": {
++      "$schema": "https://json-schema.org/draft/2020-12/schema",
++      "type": "object",
++      "properties": {},
++      "additionalProperties": false
++    },
++    "annotations": {
++      "readOnlyHint": true,
++      "destructiveHint": false,
++      "idempotentHint": true,
++      "openWorldHint": true
++    }
++  },
++  {
++    "name": "drive_list_files",
++    "description": "List children within an approved folder, with pagination.",
++    "inputSchema": {
++      "$schema": "https://json-schema.org/draft/2020-12/schema",
++      "type": "object",
++      "properties": {
++        "folderId": {
++          "type": "string",
++          "pattern": "^[A-Za-z0-9_-]{1,200}$"
++        },
++        "pageToken": {
++          "type": "string",
++          "maxLength": 2000
++        }
++      },
++      "required": [
++        "folderId"
++      ],
++      "additionalProperties": false
++    },
++    "annotations": {
++      "readOnlyHint": true,
++      "destructiveHint": false,
++      "idempotentHint": true,
++      "openWorldHint": true
++    }
++  },
++  {
++    "name": "drive_get_file",
++    "description": "Get authorized file metadata, versions, and supported export formats.",
++    "inputSchema": {
++      "$schema": "https://json-schema.org/draft/2020-12/schema",
++      "type": "object",
++      "properties": {
++        "fileId": {
++          "type": "string",
++          "pattern": "^[A-Za-z0-9_-]{1,200}$"
++        }
++      },
++      "required": [
++        "fileId"
++      ],
++      "additionalProperties": false
++    },
++    "annotations": {
++      "readOnlyHint": true,
++      "destructiveHint": false,
++      "idempotentHint": true,
++      "openWorldHint": true
++    }
++  },
++  {
++    "name": "drive_read_file",
++    "description": "Read up to 9000 bytes of UTF-8 text. Offset is a byte offset; use returned nextOffset.",
++    "inputSchema": {
++      "$schema": "https://json-schema.org/draft/2020-12/schema",
++      "type": "object",
++      "properties": {
++        "fileId": {
++          "type": "string",
++          "pattern": "^[A-Za-z0-9_-]{1,200}$"
++        },
++        "offset": {
++          "default": 0,
++          "type": "integer",
++          "minimum": 0,
++          "maximum": 9007199254740991
++        },
++        "limit": {
++          "default": 8000,
++          "type": "integer",
++          "minimum": 4,
++          "maximum": 9000
++        },
++        "expectedVersion": {
++          "type": "string",
++          "maxLength": 100
++        }
++      },
++      "required": [
++        "fileId",
++        "offset",
++        "limit"
++      ],
++      "additionalProperties": false
++    },
++    "annotations": {
++      "readOnlyHint": true,
++      "destructiveHint": false,
++      "idempotentHint": true,
++      "openWorldHint": true
++    }
++  },
++  {
++    "name": "drive_create_folder",
++    "description": "Create one folder. Retries must reuse operationId.",
++    "inputSchema": {
++      "$schema": "https://json-schema.org/draft/2020-12/schema",
++      "type": "object",
++      "properties": {
++        "parentId": {
++          "type": "string",
++          "pattern": "^[A-Za-z0-9_-]{1,200}$"
++        },
++        "name": {
++          "type": "string",
++          "minLength": 1,
++          "maxLength": 255
++        },
++        "operationId": {
++          "type": "string",
++          "minLength": 8,
++          "maxLength": 128,
++          "pattern": "^[A-Za-z0-9_.:-]+$"
++        }
++      },
++      "required": [
++        "parentId",
++        "name",
++        "operationId"
++      ],
++      "additionalProperties": false
++    },
++    "annotations": {
++      "readOnlyHint": false,
++      "destructiveHint": true,
++      "idempotentHint": false,
++      "openWorldHint": true
++    }
++  },
++  {
++    "name": "drive_create_folder_path",
++    "description": "Create nested folders under an approved folder; existing unambiguous folders are reused.",
++    "inputSchema": {
++      "$schema": "https://json-schema.org/draft/2020-12/schema",
++      "type": "object",
++      "properties": {
++        "rootId": {
++          "type": "string",
++          "pattern": "^[A-Za-z0-9_-]{1,200}$"
++        },
++        "segments": {
++          "minItems": 1,
++          "maxItems": 10,
++          "type": "array",
++          "items": {
++            "type": "string",
++            "minLength": 1,
++            "maxLength": 255
++          }
++        },
++        "operationId": {
++          "type": "string",
++          "minLength": 8,
++          "maxLength": 128,
++          "pattern": "^[A-Za-z0-9_.:-]+$"
++        }
++      },
++      "required": [
++        "rootId",
++        "segments",
++        "operationId"
++      ],
++      "additionalProperties": false
++    },
++    "annotations": {
++      "readOnlyHint": false,
++      "destructiveHint": true,
++      "idempotentHint": false,
++      "openWorldHint": true
++    }
++  },
++  {
++    "name": "drive_create_file",
++    "description": "Create a UTF-8 text file of at most 9000 bytes. For binary or larger files use drive_begin_upload.",
++    "inputSchema": {
++      "$schema": "https://json-schema.org/draft/2020-12/schema",
++      "type": "object",
++      "properties": {
++        "parentId": {
++          "type": "string",
++          "pattern": "^[A-Za-z0-9_-]{1,200}$"
++        },
++        "name": {
++          "type": "string",
++          "minLength": 1,
++          "maxLength": 255
++        },
++        "mimeType": {
++          "default": "text/plain",
++          "type": "string",
++          "maxLength": 200,
++          "pattern": "^[A-Za-z0-9!#$&^_.+-]+\\/[A-Za-z0-9!#$&^_.+-]+$"
++        },
++        "content": {
++          "type": "string"
++        },
++        "operationId": {
++          "type": "string",
++          "minLength": 8,
++          "maxLength": 128,
++          "pattern": "^[A-Za-z0-9_.:-]+$"
++        }
++      },
++      "required": [
++        "parentId",
++        "name",
++        "mimeType",
++        "content",
++        "operationId"
++      ],
++      "additionalProperties": false
++    },
++    "annotations": {
++      "readOnlyHint": false,
++      "destructiveHint": true,
++      "idempotentHint": false,
++      "openWorldHint": true
++    }
++  },
++  {
++    "name": "drive_update_file",
++    "description": "Replace UTF-8 text after a version precheck; Google Drive version checks are not atomic compare-and-swap.",
++    "inputSchema": {
++      "$schema": "https://json-schema.org/draft/2020-12/schema",
++      "type": "object",
++      "properties": {
++        "fileId": {
++          "type": "string",
++          "pattern": "^[A-Za-z0-9_-]{1,200}$"
++        },
++        "content": {
++          "type": "string"
++        },
++        "expectedVersion": {
++          "type": "string",
++          "minLength": 1,
++          "maxLength": 100
++        },
++        "operationId": {
++          "type": "string",
++          "minLength": 8,
++          "maxLength": 128,
++          "pattern": "^[A-Za-z0-9_.:-]+$"
++        }
++      },
++      "required": [
++        "fileId",
++        "content",
++        "expectedVersion",
++        "operationId"
++      ],
++      "additionalProperties": false
++    },
++    "annotations": {
++      "readOnlyHint": false,
++      "destructiveHint": true,
++      "idempotentHint": false,
++      "openWorldHint": true
++    }
++  },
++  {
++    "name": "drive_begin_upload",
++    "description": "Start a resumable binary upload. Send raw chunks to /api/transfers/{transferId}?offset=N with the same bearer credential. Non-final chunks are multiples of 256 KiB, max 1 MiB.",
++    "inputSchema": {
++      "$schema": "https://json-schema.org/draft/2020-12/schema",
++      "type": "object",
++      "properties": {
++        "parentId": {
++          "type": "string",
++          "pattern": "^[A-Za-z0-9_-]{1,200}$"
++        },
++        "fileId": {
++          "type": "string",
++          "pattern": "^[A-Za-z0-9_-]{1,200}$"
++        },
++        "name": {
++          "type": "string",
++          "minLength": 1,
++          "maxLength": 255
++        },
++        "mimeType": {
++          "type": "string",
++          "maxLength": 200,
++          "pattern": "^[A-Za-z0-9!#$&^_.+-]+\\/[A-Za-z0-9!#$&^_.+-]+$"
++        },
++        "totalBytes": {
++          "type": "integer",
++          "minimum": 0,
++          "maximum": 9007199254740991
++        },
++        "expectedMd5": {
++          "type": "string",
++          "pattern": "^[a-f0-9]{32}$"
++        },
++        "expectedVersion": {
++          "type": "string",
++          "maxLength": 100
++        },
++        "operationId": {
++          "type": "string",
++          "minLength": 8,
++          "maxLength": 128,
++          "pattern": "^[A-Za-z0-9_.:-]+$"
++        }
++      },
++      "required": [
++        "mimeType",
++        "totalBytes",
++        "operationId"
++      ],
++      "additionalProperties": false
++    },
++    "annotations": {
++      "readOnlyHint": false,
++      "destructiveHint": true,
++      "idempotentHint": false,
++      "openWorldHint": true
++    }
++  },
++  {
++    "name": "drive_transfer_status",
++    "description": "Read a transfer's last recorded status. Complete upload probes Google for authoritative progress.",
++    "inputSchema": {
++      "$schema": "https://json-schema.org/draft/2020-12/schema",
++      "type": "object",
++      "properties": {
++        "transferId": {
++          "type": "string",
++          "format": "uuid",
++          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
++        }
++      },
++      "required": [
++        "transferId"
++      ],
++      "additionalProperties": false
++    },
++    "annotations": {
++      "readOnlyHint": true,
++      "destructiveHint": false,
++      "idempotentHint": true,
++      "openWorldHint": true
++    }
++  },
++  {
++    "name": "drive_complete_upload",
++    "description": "Probe resumable upload progress and verify completed size. Returns file metadata including Google's MD5 when available.",
++    "inputSchema": {
++      "$schema": "https://json-schema.org/draft/2020-12/schema",
++      "type": "object",
++      "properties": {
++        "transferId": {
++          "type": "string",
++          "format": "uuid",
++          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
++        }
++      },
++      "required": [
++        "transferId"
++      ],
++      "additionalProperties": false
++    },
++    "annotations": {
++      "readOnlyHint": false,
++      "destructiveHint": true,
++      "idempotentHint": false,
++      "openWorldHint": true
++    }
++  },
++  {
++    "name": "drive_begin_download",
++    "description": "Create an authorized binary download transfer. Google-native files require a supported export MIME type; Drive exports have Google's 10 MB limit.",
++    "inputSchema": {
++      "$schema": "https://json-schema.org/draft/2020-12/schema",
++      "type": "object",
++      "properties": {
++        "fileId": {
++          "type": "string",
++          "pattern": "^[A-Za-z0-9_-]{1,200}$"
++        },
++        "exportMimeType": {
++          "type": "string",
++          "maxLength": 200,
++          "pattern": "^[A-Za-z0-9!#$&^_.+-]+\\/[A-Za-z0-9!#$&^_.+-]+$"
++        }
++      },
++      "required": [
++        "fileId"
++      ],
++      "additionalProperties": false
++    },
++    "annotations": {
++      "readOnlyHint": true,
++      "destructiveHint": false,
++      "idempotentHint": true,
++      "openWorldHint": true
++    }
++  },
++  {
++    "name": "drive_read_download_chunk",
++    "description": "Read a small base64 chunk via MCP. Large transfers should use the authenticated HTTP endpoint.",
++    "inputSchema": {
++      "$schema": "https://json-schema.org/draft/2020-12/schema",
++      "type": "object",
++      "properties": {
++        "transferId": {
++          "type": "string",
++          "format": "uuid",
++          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
++        },
++        "offset": {
++          "type": "integer",
++          "minimum": 0,
++          "maximum": 9007199254740991
++        },
++        "limit": {
++          "default": 8000,
++          "type": "integer",
++          "minimum": 1,
++          "maximum": 9000
++        }
++      },
++      "required": [
++        "transferId",
++        "offset",
++        "limit"
++      ],
++      "additionalProperties": false
++    },
++    "annotations": {
++      "readOnlyHint": true,
++      "destructiveHint": false,
++      "idempotentHint": true,
++      "openWorldHint": true
++    }
++  },
++  {
++    "name": "drive_create_native_file",
++    "description": "Create a native Google Doc, Sheet, or Slides presentation inside an approved folder.",
++    "inputSchema": {
++      "$schema": "https://json-schema.org/draft/2020-12/schema",
++      "type": "object",
++      "properties": {
++        "parentId": {
++          "type": "string",
++          "pattern": "^[A-Za-z0-9_-]{1,200}$"
++        },
++        "name": {
++          "type": "string",
++          "minLength": 1,
++          "maxLength": 255
++        },
++        "kind": {
++          "type": "string",
++          "enum": [
++            "docs",
++            "sheets",
++            "slides"
++          ]
++        },
++        "operationId": {
++          "type": "string",
++          "minLength": 8,
++          "maxLength": 128,
++          "pattern": "^[A-Za-z0-9_.:-]+$"
++        }
++      },
++      "required": [
++        "parentId",
++        "name",
++        "kind",
++        "operationId"
++      ],
++      "additionalProperties": false
++    },
++    "annotations": {
++      "readOnlyHint": false,
++      "destructiveHint": true,
++      "idempotentHint": false,
++      "openWorldHint": true
++    }
++  },
++  {
++    "name": "drive_read_native_file",
++    "description": "Read Google Docs/Slides JSON or Sheets values. Paginated JSON fragments fit agent-bot's result budget; reassemble before parsing.",
++    "inputSchema": {
++      "$schema": "https://json-schema.org/draft/2020-12/schema",
++      "type": "object",
++      "properties": {
++        "fileId": {
++          "type": "string",
++          "pattern": "^[A-Za-z0-9_-]{1,200}$"
++        },
++        "kind": {
++          "type": "string",
++          "enum": [
++            "docs",
++            "sheets",
++            "slides"
++          ]
++        },
++        "range": {
++          "type": "string",
++          "minLength": 1,
++          "maxLength": 200
++        },
++        "offset": {
++          "default": 0,
++          "type": "integer",
++          "minimum": 0,
++          "maximum": 9007199254740991
++        },
++        "expectedVersion": {
++          "type": "string",
++          "maxLength": 100
++        }
++      },
++      "required": [
++        "fileId",
++        "kind",
++        "offset"
++      ],
++      "additionalProperties": false
++    },
++    "annotations": {
++      "readOnlyHint": true,
++      "destructiveHint": false,
++      "idempotentHint": true,
++      "openWorldHint": true
++    }
++  },
++  {
++    "name": "drive_write_native_file",
++    "description": "Edit native documents. Docs/Slides require revisionId and an allowlisted batch. Sheets writes RAW values to a range. Unknown outcomes are never automatically replayed.",
++    "inputSchema": {
++      "$schema": "https://json-schema.org/draft/2020-12/schema",
++      "type": "object",
++      "properties": {
++        "fileId": {
++          "type": "string",
++          "pattern": "^[A-Za-z0-9_-]{1,200}$"
++        },
++        "kind": {
++          "type": "string",
++          "enum": [
++            "docs",
++            "sheets",
++            "slides"
++          ]
++        },
++        "revisionId": {
++          "type": "string",
++          "maxLength": 200
++        },
++        "range": {
++          "type": "string",
++          "minLength": 1,
++          "maxLength": 200
++        },
++        "values": {
++          "maxItems": 100,
++          "type": "array",
++          "items": {
++            "maxItems": 100,
++            "type": "array",
++            "items": {
++              "anyOf": [
++                {
++                  "type": "string",
++                  "maxLength": 9000
++                },
++                {
++                  "type": "number"
++                },
++                {
++                  "type": "boolean"
++                },
++                {
++                  "type": "null"
++                }
++              ]
++            }
++          }
++        },
++        "requests": {
++          "maxItems": 20,
++          "type": "array",
++          "items": {
++            "type": "object",
++            "propertyNames": {
++              "type": "string"
++            },
++            "additionalProperties": {}
++          }
++        },
++        "operationId": {
++          "type": "string",
++          "minLength": 8,
++          "maxLength": 128,
++          "pattern": "^[A-Za-z0-9_.:-]+$"
++        }
++      },
++      "required": [
++        "fileId",
++        "kind",
++        "operationId"
++      ],
++      "additionalProperties": false
++    },
++    "annotations": {
++      "readOnlyHint": false,
++      "destructiveHint": true,
++      "idempotentHint": false,
++      "openWorldHint": true
++    }
++  }
++]
+\ No newline at end of file
+diff --git a/src/worker/capabilities/file-mcp.ts b/src/worker/capabilities/file-mcp.ts
+new file mode 100644
+index 0000000..76849ae
+--- /dev/null
++++ b/src/worker/capabilities/file-mcp.ts
+@@ -0,0 +1,32 @@
++import { z } from "zod";
++import catalog from "./file-mcp-catalog.json";
++import type { CapabilityDefinition } from "./registry";
++const PROTOCOL="2025-11-25";
++export function fileMcpDefinitions(env:Record<string,string|undefined>=process.env,request:typeof fetch=fetch):CapabilityDefinition[]{
++  if(env.FILE_MCP_ENABLED!=="true")return [];
++  const selected=new Set((env.FILE_MCP_TOOLS??"").split(",").map(value=>value.trim()).filter(Boolean));
++  return catalog.filter(tool=>selected.has(tool.name)).map(tool=>({
++    scope:"general",request:{id:tool.name,description:tool.description,inputSchema:tool.inputSchema},
++    input:z.record(z.string(),z.unknown()),timeoutMs:60_000,
++    async execute(args,signal){
++      if(!env.FILE_MCP_SESSION)throw new Error("FILE_MCP_SESSION_UNAVAILABLE");
++      const url=new URL(env.FILE_MCP_URL??"");
++      if((url.protocol!=="https:"&&!(url.protocol==="http:"&&url.hostname==="localhost"&&!env.VERCEL))||url.pathname!=="/api/mcp"||url.username||url.password||url.search||url.hash)throw new Error("FILE_MCP_URL_INVALID");
++      const headers={authorization:`Bearer ${env.FILE_MCP_SESSION}`,"content-type":"application/json",accept:"application/json, text/event-stream","mcp-protocol-version":PROTOCOL};
++      async function rpc(method:string,params?:unknown,id?:number){
++        const response=await request(url,{method:"POST",headers,body:JSON.stringify({jsonrpc:"2.0",...(id===undefined?{}:{id}),method,params}),signal,redirect:"error",cache:"no-store"});
++        if(!response.ok){await response.body?.cancel();const error=new Error("FILE_MCP_UNAVAILABLE") as Error&{status:number};error.status=response.status;throw error;}
++        if(id===undefined){await response.body?.cancel();return undefined;}
++        const payload=await response.json();if(payload.error)throw new Error("FILE_MCP_PROTOCOL_ERROR");return payload.result;
++      }
++      const initialized=await rpc("initialize",{protocolVersion:PROTOCOL,capabilities:{},clientInfo:{name:"agent-bot",version:"0.1.0"}},1);
++      if(initialized?.protocolVersion!==PROTOCOL)throw new Error("FILE_MCP_PROTOCOL_MISMATCH");
++      await rpc("notifications/initialized");
++      const result=await rpc("tools/call",{name:tool.name,arguments:args},2);
++      const parsed=z.object({isError:z.boolean().optional(),structuredContent:z.object({data:z.unknown().optional(),error:z.string().optional()})}).safeParse(result);
++      if(!parsed.success)throw new Error("FILE_MCP_RESULT_INVALID");
++      if(parsed.data.isError)throw new Error(`FILE_MCP_TOOL_ERROR:${parsed.data.structuredContent.error??"UNKNOWN"}`);
++      return parsed.data.structuredContent.data;
++    }
++  }));
++}
+diff --git a/src/worker/capabilities/index.ts b/src/worker/capabilities/index.ts
+index a38cad5..35463d6 100644
+--- a/src/worker/capabilities/index.ts
++++ b/src/worker/capabilities/index.ts
+@@ -1,9 +1,11 @@
+ import { z } from "zod";
+ import { CapabilityRegistry } from "./registry";
++import { fileMcpDefinitions } from "./file-mcp";
+ 
+ /** Builds the code-owned registry of skill-facing capability identifiers. */
+ export function createCapabilityRegistry() {
+   return new CapabilityRegistry([
++    ...fileMcpDefinitions(),
+     {
+       // Authorization-only compatibility identifier. DeepSeekProvider removes
+       // it from function definitions and offers native web_search in the
+diff --git a/tests/unit/server/file-mcp/delegation.test.ts b/tests/unit/server/file-mcp/delegation.test.ts
+new file mode 100644
+index 0000000..f6bff75
+--- /dev/null
++++ b/tests/unit/server/file-mcp/delegation.test.ts
+@@ -0,0 +1,8 @@
++import { describe,it,expect,vi } from "vitest";
++import { fileMcpWorkerEnvironment } from "../../../../src/server/file-mcp/delegation";
++const env={FILE_MCP_ENABLED:"true",FILE_MCP_ALLOW_USERS:"123",FILE_MCP_TOOLS:"drive_list_roots",FILE_MCP_URL:"https://file-mcp.example/api/mcp",FILE_MCP_API_KEY:"k".repeat(43)};
++describe("File MCP server delegation",()=>{
++  it("does not contact MCP for unapproved users",async()=>{const request=vi.fn();expect(await fileMcpWorkerEnvironment("999",env,request)).toEqual({FILE_MCP_ENABLED:"false"});expect(request).not.toHaveBeenCalled();});
++  it("passes only a scoped session to the worker",async()=>{const request=vi.fn().mockResolvedValue(Response.json({token:"s".repeat(43),expiresAt:new Date(Date.now()+300000).toISOString()}));const result=await fileMcpWorkerEnvironment("123",env,request);expect(result.FILE_MCP_SESSION).toBe("s".repeat(43));expect(result).not.toHaveProperty("FILE_MCP_API_KEY");expect(JSON.stringify(result)).not.toContain(env.FILE_MCP_API_KEY);expect(JSON.parse(request.mock.calls[0][1].body)).toEqual({tools:["drive_list_roots"],ttlSeconds:300});});
++  it("rejects unknown tool names",async()=>{await expect(fileMcpWorkerEnvironment("123",{...env,FILE_MCP_TOOLS:"arbitrary_tool"},vi.fn())).rejects.toThrow("FILE_MCP_TOOLS_INVALID");});
++});
+diff --git a/tests/unit/worker/capabilities/file-mcp.test.ts b/tests/unit/worker/capabilities/file-mcp.test.ts
+new file mode 100644
+index 0000000..7459c08
+--- /dev/null
++++ b/tests/unit/worker/capabilities/file-mcp.test.ts
+@@ -0,0 +1,9 @@
++import { describe,it,expect,vi } from "vitest";
++import { fileMcpDefinitions } from "../../../../src/worker/capabilities/file-mcp";
++describe("File MCP capability adapter",()=>{
++  const env={FILE_MCP_ENABLED:"true",FILE_MCP_TOOLS:"drive_list_roots",FILE_MCP_URL:"https://file-mcp.example/api/mcp",FILE_MCP_SESSION:"s".repeat(43)};
++  it("does not offer tools when disabled",()=>expect(fileMcpDefinitions({})).toEqual([]));
++  it("exposes only configured tools",()=>expect(fileMcpDefinitions(env).map(tool=>tool.request.id)).toEqual(["drive_list_roots"]));
++  it("negotiates MCP and unwraps structured results",async()=>{const request=vi.fn().mockResolvedValueOnce(Response.json({result:{protocolVersion:"2025-11-25"}})).mockResolvedValueOnce(new Response(null,{status:202})).mockResolvedValueOnce(Response.json({result:{isError:false,structuredContent:{data:[{folder_id:"root"}]}}}));const tool=fileMcpDefinitions(env,request)[0];expect(await tool.execute({},new AbortController().signal)).toEqual([{folder_id:"root"}]);expect(request.mock.calls[2][1].headers.authorization).toBe(`Bearer ${env.FILE_MCP_SESSION}`);});
++  it("preserves operation IDs in mutations",async()=>{const request=vi.fn().mockResolvedValueOnce(Response.json({result:{protocolVersion:"2025-11-25"}})).mockResolvedValueOnce(new Response(null,{status:202})).mockResolvedValueOnce(Response.json({result:{isError:false,structuredContent:{data:{id:"folder"}}}}));await fileMcpDefinitions({...env,FILE_MCP_TOOLS:"drive_create_folder"},request)[0].execute({parentId:"root",name:"Reports",operationId:"stable-operation"},new AbortController().signal);expect(JSON.parse(request.mock.calls[2][1].body).params.arguments.operationId).toBe("stable-operation");});
++});
