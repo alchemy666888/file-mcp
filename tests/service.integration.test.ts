@@ -212,6 +212,14 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)(
         ),
       );
     });
+    beforeAll(async () => {
+      await db().query(
+        await readFile(
+          new URL("../migrations/002_mcp_oauth.sql", import.meta.url),
+          "utf8",
+        ),
+      );
+    });
     beforeEach(async () => {
       await db().query(
         "TRUNCATE delegated_sessions,audit_events,transfers,operations,root_grants,mcp_clients,google_connection,oauth_states,login_limits RESTART IDENTITY CASCADE",

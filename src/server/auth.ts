@@ -38,6 +38,8 @@ export type Client = {
   name: string;
   can_write: boolean;
   permitted_tools?: string[];
+  permitted_roots?: { folder_id: string; can_write: boolean }[];
+  oauth_grant_id?: string;
 };
 export async function authenticate(request: Request): Promise<Client> {
   const authorization = request.headers.get("authorization") ?? "";
@@ -48,6 +50,11 @@ export async function authenticate(request: Request): Promise<Client> {
     [hash(authorization.slice(7))],
   );
   if (result.rows[0]) return result.rows[0];
+  const oauth = await db().query<Client>(
+    "SELECT c.id,c.name,(c.can_write AND position('mcp:write' in g.scope)>0) AS can_write,g.tools AS permitted_tools,g.roots AS permitted_roots,g.id AS oauth_grant_id FROM mcp_oauth_tokens t JOIN mcp_oauth_grants g ON g.id=t.grant_id JOIN mcp_oauth_clients o ON o.id=g.client_id JOIN mcp_clients c ON c.id=o.parent_id WHERE t.hash=$1 AND t.kind='access' AND NOT t.used AND t.expires_at>now() AND g.expires_at>now() AND NOT g.revoked AND NOT o.revoked AND NOT c.revoked",
+    [hash(authorization.slice(7))],
+  );
+  if (oauth.rows[0]) return oauth.rows[0];
   const delegated = await db().query<Client>(
     "SELECT c.id,c.name,c.can_write,s.tools AS permitted_tools FROM delegated_sessions s JOIN mcp_clients c ON c.id=s.client_id WHERE s.token_hash=$1 AND s.expires_at>now() AND NOT c.revoked",
     [hash(authorization.slice(7))],

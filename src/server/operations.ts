@@ -23,6 +23,8 @@ export async function mutation<T>(
     reconcile: (id: string) => Promise<T | undefined>;
   },
 ): Promise<T> {
+  if (client.oauth_grant_id)
+    operationId = `oauth:${client.oauth_grant_id}:${operationId}`;
   // Commit unknown outcomes rather than rolling them back: lost responses must not trigger blind replay.
   const outcome = await transaction(async (connection) => {
     await connection.query(

@@ -24,6 +24,7 @@ a {
 }
 button,
 input,
+textarea,
 select {
   font: inherit;
 }
@@ -37,6 +38,7 @@ button:disabled {
 button:focus-visible,
 a:focus-visible,
 input:focus-visible,
+textarea:focus-visible,
 select:focus-visible {
   outline: 3px solid #588432;
   outline-offset: 4px;
@@ -163,6 +165,7 @@ label {
   margin: 15px 0 8px;
 }
 input:not([type="checkbox"]),
+textarea,
 select {
   width: 100%;
   border: 1px solid var(--line);

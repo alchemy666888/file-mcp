@@ -1,3 +1,4 @@
+import { config } from "./config";
 export class AppError extends Error {
   constructor(
     public code: string,
@@ -33,7 +34,14 @@ export function errorResponse(error: unknown): Response {
           : errorCode(error) === "INVALID_ARGUMENTS"
             ? 400
             : 500,
-      headers: { "cache-control": "no-store" },
+      headers: {
+        "cache-control": "no-store",
+        ...(error instanceof AppError && error.code === "UNAUTHORIZED"
+          ? {
+              "www-authenticate": `Bearer resource_metadata="${config().APP_URL}/.well-known/oauth-protected-resource/api/mcp"`,
+            }
+          : {}),
+      },
     },
   );
 }

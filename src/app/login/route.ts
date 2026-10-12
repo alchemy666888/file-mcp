@@ -21,15 +21,26 @@ export async function POST(request: Request) {
     const form = new URLSearchParams(
       new TextDecoder().decode(await boundedBody(request, 4096)),
     );
+    const returnTo = form.get("returnTo") ?? "";
+    const destination = /^\/oauth\/consent\?request=[A-Za-z0-9_-]{43}$/.test(
+      returnTo,
+    )
+      ? returnTo
+      : "/dashboard";
     if (!equal(form.get("password") ?? "", config().DASHBOARD_SECRET))
       return NextResponse.redirect(
-        new URL("/?error=login", config().APP_URL),
+        new URL(
+          destination === "/dashboard" ? "/?error=login" : destination,
+          config().APP_URL,
+        ),
         303,
       );
     const response = NextResponse.redirect(
-      new URL("/dashboard", config().APP_URL),
+      new URL(destination, config().APP_URL),
       303,
     );
+    response.headers.set("cache-control", "no-store");
+    response.headers.set("referrer-policy", "no-referrer");
     response.cookies.set(sessionName(), makeSession(), {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",

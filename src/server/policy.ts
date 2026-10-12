@@ -9,12 +9,21 @@ export async function grants(
   client: Client,
   connection: Pick<PoolClient, "query"> = db(),
 ): Promise<Grant[]> {
-  return (
+  const roots = (
     await connection.query<Grant>(
       "SELECT folder_id,name,can_write FROM root_grants WHERE client_id=$1",
       [client.id],
     )
   ).rows;
+  if (!client.permitted_roots) return roots;
+  return roots.flatMap((root) => {
+    const approved = client.permitted_roots!.find(
+      (value) => value.folder_id === root.folder_id,
+    );
+    return approved
+      ? [{ ...root, can_write: root.can_write && approved.can_write }]
+      : [];
+  });
 }
 export async function checkAncestry(
   drive: Pick<GoogleDrive, "metadata">,
