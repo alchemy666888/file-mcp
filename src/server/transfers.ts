@@ -9,6 +9,7 @@ import { FILE_FIELDS, type GoogleDrive, type DriveFile } from "./google";
 import { authorize } from "./policy";
 import { CHUNK_SIZE, isNative, sliceStream } from "./content";
 export type TransferData = {
+  oauthGrantId?: string;
   fileId: string;
   parentId?: string;
   mimeType: string;
@@ -49,7 +50,18 @@ export async function saveTransfer(
   const expires = new Date(Date.now() + 86400000);
   await db().query(
     "INSERT INTO transfers(id,client_id,kind,data,expires_at) VALUES($1,$2,$3,$4,$5)",
-    [id, client.id, kind, JSON.stringify(data), expires],
+    [
+      id,
+      client.id,
+      kind,
+      JSON.stringify({
+        ...data,
+        ...(client.oauth_grant_id
+          ? { oauthGrantId: client.oauth_grant_id }
+          : {}),
+      }),
+      expires,
+    ],
   );
   return publicTransfer({ id, kind, data, expires_at: expires });
 }
@@ -59,8 +71,8 @@ export async function getTransfer(
 ): Promise<Transfer> {
   const row = (
     await db().query<Transfer>(
-      "SELECT id,kind,data,expires_at FROM transfers WHERE id=$1 AND client_id=$2 AND expires_at>now()",
-      [id, client.id],
+      "SELECT id,kind,data,expires_at FROM transfers WHERE id=$1 AND client_id=$2 AND expires_at>now() AND ($3::text IS NULL OR data->>'oauthGrantId'=$3)",
+      [id, client.id, client.oauth_grant_id ?? null],
     )
   ).rows[0];
   if (!row) throw new AppError("TRANSFER_NOT_FOUND", 404);
@@ -127,8 +139,8 @@ export async function uploadChunk(
   return transaction(async (connection) => {
     const transfer = (
       await connection.query<Transfer>(
-        "SELECT id,kind,data,expires_at FROM transfers WHERE id=$1 AND client_id=$2 AND expires_at>now() FOR UPDATE",
-        [id, client.id],
+        "SELECT id,kind,data,expires_at FROM transfers WHERE id=$1 AND client_id=$2 AND expires_at>now() AND ($3::text IS NULL OR data->>'oauthGrantId'=$3) FOR UPDATE",
+        [id, client.id, client.oauth_grant_id ?? null],
       )
     ).rows[0];
     if (!transfer || transfer.kind !== "upload")
@@ -199,8 +211,8 @@ export async function completeUpload(
   return transaction(async (connection) => {
     const transfer = (
       await connection.query<Transfer>(
-        "SELECT id,kind,data,expires_at FROM transfers WHERE id=$1 AND client_id=$2 AND expires_at>now() FOR UPDATE",
-        [id, client.id],
+        "SELECT id,kind,data,expires_at FROM transfers WHERE id=$1 AND client_id=$2 AND expires_at>now() AND ($3::text IS NULL OR data->>'oauthGrantId'=$3) FOR UPDATE",
+        [id, client.id, client.oauth_grant_id ?? null],
       )
     ).rows[0];
     if (!transfer || transfer.kind !== "upload")
@@ -322,8 +334,8 @@ export async function beginDownload(
 export async function recoverUpload(client: Client, operationId: string) {
   const transfer = (
     await db().query<Transfer>(
-      "SELECT id,kind,data,expires_at FROM transfers WHERE client_id=$1 AND kind='upload' AND data->>'operationId'=$2 AND expires_at>now() ORDER BY created_at DESC LIMIT 1",
-      [client.id, operationId],
+      "SELECT id,kind,data,expires_at FROM transfers WHERE client_id=$1 AND kind='upload' AND data->>'operationId'=$2 AND expires_at>now() AND ($3::text IS NULL OR data->>'oauthGrantId'=$3) ORDER BY created_at DESC LIMIT 1",
+      [client.id, operationId, client.oauth_grant_id ?? null],
     )
   ).rows[0];
   return transfer ? publicTransfer(transfer) : undefined;

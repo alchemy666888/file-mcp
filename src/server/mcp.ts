@@ -8,6 +8,7 @@ import { AppError, errorCode, errorResponse } from "./errors";
 import { accessToken, GoogleDrive } from "./google";
 import { invokeTool, toolCatalog, tools } from "./tools";
 export const PROTOCOL = "2025-11-25";
+export const SUPPORTED_PROTOCOLS = ["2025-03-26", "2025-06-18", PROTOCOL];
 const message = z
   .object({
     jsonrpc: z.literal("2.0"),
@@ -38,7 +39,7 @@ export async function handleMcp(request: Request) {
     const input = parsed.data;
     rpcId = input.id;
     const protocol = request.headers.get("mcp-protocol-version");
-    if (protocol && protocol !== PROTOCOL)
+    if (protocol && !SUPPORTED_PROTOCOLS.includes(protocol))
       return rpcError(rpcId, -32600, "PROTOCOL_VERSION_UNSUPPORTED", 400);
     if (input.method === "notifications/initialized")
       return new Response(null, { status: 202, headers });
@@ -58,7 +59,11 @@ export async function handleMcp(request: Request) {
           .safeParse(input.params);
         if (!params.success) return rpcError(rpcId, -32602, "INVALID_PARAMS");
         result = {
-          protocolVersion: PROTOCOL,
+          protocolVersion: SUPPORTED_PROTOCOLS.includes(
+            params.data.protocolVersion,
+          )
+            ? params.data.protocolVersion
+            : PROTOCOL,
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: "file-management-mcp", version: "0.1.0" },
           instructions:

@@ -18,6 +18,17 @@ The backend tests cover ancestry boundaries, read-only grants, shortcuts, trashe
 
 The browser tests verify responsive rendering, authentication-required redirects, operator sign-in, client creation, one-time bearer display, and logout. They found a real browser origin issue caused by `Referrer-Policy: no-referrer` on the login form. The general policy now uses `strict-origin-when-cross-origin`; Google callback redirects retain `no-referrer`.
 
+## MCP OAuth update — 12 October 2026
+
+Verified the updated source with PostgreSQL 17 and mocked Google APIs:
+
+- 57 service/security/OAuth tests passed, including PKCE, exact callbacks, resource binding, code/refresh replay, concurrent refresh, expiry, browser-bound consent, scope restrictions, permission ceilings, revocation, and OAuth transfer/idempotency isolation.
+- 7 existing agent-bot adapter/delegation tests passed.
+- 3 Chromium tests passed, including operator-managed OAuth registration, one-time secret display, login return to consent, authorization-code exchange, MCP tool listing, and revocation.
+- Next.js production build, TypeScript, ESLint, and Prettier checks passed.
+
+The OAuth database migration was exercised against an existing initial schema. No production database, Google account, Vercel environment, or live ChatGPT connection was used. ChatGPT account setup and live acceptance remain necessary after deployment; see [the setup guide](chatgpt-setup.md).
+
 ## Reproduce service tests
 
 Run `pnpm test` for unit tests. PostgreSQL integration tests are skipped unless `TEST_DATABASE_URL` is supplied. Provision an isolated database, then run:

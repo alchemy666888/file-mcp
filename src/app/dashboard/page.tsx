@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { OAuthControls } from "@/components/oauth-controls";
 import { redirect } from "next/navigation";
 import { isOperator } from "@/server/auth";
 import { configured, config } from "@/server/config";
@@ -13,23 +14,35 @@ export default async function Dashboard() {
   if (!configured() || !(await isOperator())) redirect("/");
   let state;
   try {
-    const [connection, clients, grants, audit] = await Promise.all([
-      db().query("SELECT updated_at FROM google_connection"),
-      db().query(
-        "SELECT id,name,can_write,revoked FROM mcp_clients ORDER BY created_at DESC",
-      ),
-      db().query(
-        "SELECT r.*,c.name AS client_name FROM root_grants r JOIN mcp_clients c ON c.id=r.client_id WHERE NOT c.revoked ORDER BY r.name",
-      ),
-      db().query(
-        "SELECT a.tool,a.outcome,a.code,a.duration_ms,a.created_at,c.name AS client_name FROM audit_events a LEFT JOIN mcp_clients c ON c.id=a.client_id ORDER BY a.created_at DESC LIMIT 30",
-      ),
-    ]);
+    const [connection, clients, grants, audit, oauthClients, oauthGrants] =
+      await Promise.all([
+        db().query("SELECT updated_at FROM google_connection"),
+        db().query(
+          "SELECT id,name,can_write,revoked FROM mcp_clients ORDER BY created_at DESC",
+        ),
+        db().query(
+          "SELECT r.*,c.name AS client_name FROM root_grants r JOIN mcp_clients c ON c.id=r.client_id WHERE NOT c.revoked ORDER BY r.name",
+        ),
+        db().query(
+          "SELECT a.tool,a.outcome,a.code,a.duration_ms,a.created_at,c.name AS client_name FROM audit_events a LEFT JOIN mcp_clients c ON c.id=a.client_id ORDER BY a.created_at DESC LIMIT 30",
+        ),
+        db().query(
+          "SELECT o.id,o.name,o.auth_method,o.redirect_uris,o.revoked,c.name AS parent_name FROM mcp_oauth_clients o JOIN mcp_clients c ON c.id=o.parent_id ORDER BY o.created_at DESC",
+        ),
+        db().query(
+          "SELECT g.id,o.name AS client_name,g.scope,(g.expires_at<=now()) AS expired,(g.revoked OR o.revoked OR c.revoked) AS revoked,g.expires_at FROM mcp_oauth_grants g JOIN mcp_oauth_clients o ON o.id=g.client_id JOIN mcp_clients c ON c.id=o.parent_id ORDER BY g.created_at DESC LIMIT 50",
+        ),
+      ]);
     state = {
       connection: connection.rows[0],
       clients: clients.rows,
       grants: grants.rows,
       audit: audit.rows,
+      oauthClients: oauthClients.rows,
+      oauthGrants: oauthGrants.rows.map((grant) => ({
+        ...grant,
+        expires_at: new Date(grant.expires_at).toISOString(),
+      })),
     };
   } catch {
     return (
@@ -108,6 +121,11 @@ export default async function Dashboard() {
         </div>
       </div>
       <OperatorControls clients={state.clients} />
+      <OAuthControls
+        parents={state.clients}
+        clients={state.oauthClients}
+        grants={state.oauthGrants}
+      />
       <section className="panel">
         <div className="section-heading">
           <h2>Approved folders</h2>
@@ -193,8 +211,8 @@ export default async function Dashboard() {
         <span className="eyebrow">MCP ENDPOINT</span>
         <code>{config().APP_URL}/api/mcp</code>
         <p>
-          Streamable HTTP · Bearer authentication · Google credentials stay on
-          this server
+          Streamable HTTP · OAuth and bearer authentication · Google credentials
+          stay on this server
         </p>
       </section>
       <footer>

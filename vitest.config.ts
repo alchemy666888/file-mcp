@@ -9,5 +9,9 @@ export default defineConfig({
       ),
     },
   },
-  test: { include: ["tests/**/*.test.ts"], setupFiles: ["./tests/setup.ts"] },
+  test: {
+    fileParallelism: false,
+    include: ["tests/**/*.test.ts"],
+    setupFiles: ["./tests/setup.ts"],
+  },
 });

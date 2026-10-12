@@ -4,7 +4,8 @@ A Next.js service that gives [agent-bot](https://github.com/alchemy666888/agent-
 
 ## What is implemented
 
-- Stateless Streamable HTTP MCP at `/api/mcp`, protocol `2025-11-25`.
+- Stateless Streamable HTTP MCP at `/api/mcp`, with protocol negotiation through `2025-11-25`.
+- MCP OAuth discovery, operator-managed client registration, PKCE consent, expiring access tokens, rotating refresh tokens, and revocation for ChatGPT and compatible AI clients.
 - Folder listing, metadata, paginated UTF-8 reads, text create/replace, folders and nested folder paths.
 - Arbitrary binary uploads using resumable Google Drive sessions, authenticated 1 MiB chunks, persisted progress, optional MD5 verification, and paginated downloads.
 - Native Google Docs, Sheets, and Slides creation, structured reads, supported native edits, and Google-supported exports.
@@ -49,6 +50,10 @@ Only one Google connection is stored. Disconnect deletes local credentials and t
 Use separate OAuth clients, database instances, keys, credentials, and folders for Preview and Production. Builds do not need Google or database credentials. `/api/health` reports configuration presence only; it does not claim that Google or PostgreSQL connectivity is healthy.
 
 MCP and transfer functions have a 60-second maximum and bounded upstream timeouts. Transfer chunks are at most 1 MiB, below Vercel's 4.5 MB payload limit. Long files span many requests. Hobby is appropriate for personal/noncommercial use; provider quotas and PostgreSQL costs apply independently. No deployment or live Google verification is implied by the local test results.
+
+## ChatGPT and OAuth clients
+
+See [the step-by-step setup guide](docs/chatgpt-setup.md). Existing deployments must apply `migrations/002_mcp_oauth.sql` before deploying this version. No additional runtime environment variables are needed. Each OAuth registration uses a selected existing MCP client’s folder grants, with permissions bounded by explicit operator consent.
 
 ## MCP tools
 
