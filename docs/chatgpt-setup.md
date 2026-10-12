@@ -29,7 +29,11 @@ The server advertises `mcp:read` and `mcp:write`. An omitted scope defaults to r
 
 Register each client separately with its exact callback URLs, selected permission client, and supported authentication method (`none` for public clients, `client_secret_post`, or `client_secret_basic`). Public clients still require PKCE S256. This release uses operator-managed registration; dynamic registration and URL-based client metadata are not implemented. Clients that require those features need an adapter or additional implementation. Existing Codex/agent-bot bearer-token configurations remain supported.
 
-Clients must implement authorization code with PKCE S256, request the exact resource `https://file-mgmt-mcp.vercel.app/api/mcp` in authorization and token/refresh requests, and support remote Streamable HTTP. Supported protocol negotiation: `2025-03-26`, `2025-06-18`, `2025-11-25`. The service responds with JSON and uses stateless requests; authenticated GET streaming is not offered (405). Requests originating in a browser from another origin are rejected; server-to-server clients work without an Origin header.
+Clients must implement authorization code with PKCE S256, request the exact resource `https://file-mgmt-mcp.vercel.app/api/mcp` during authorization, and support remote Streamable HTTP. Supported protocol negotiation: `2025-03-26`, `2025-06-18`, `2025-11-25`. The service responds with JSON and uses stateless requests; authenticated GET streaming is not offered (405). Requests originating in a browser from another origin are rejected; server-to-server clients work without an Origin header.
+
+Token and refresh requests may repeat that exact resource or omit it: the server uses the single resource already bound to the code/refresh grant. An explicitly different or empty resource is rejected. Scopes are compared as sets, so reversing their order does not change permissions. Extra scopes are rejected.
+
+For a failure after consent, clear Vercel log filters and inspect `/oauth/token` followed by `/api/mcp`. Token failures log `mcp_oauth_token_failure` with only a safe error code. No token request indicates the callback/client side needs investigation; a 400/401 token response indicates exchange failure; a 200 token response followed by failed MCP requests indicates initialization/authentication failure. Do not share callback URLs containing codes or token request bodies.
 
 ## Lifetimes and revocation
 

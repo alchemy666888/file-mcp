@@ -414,6 +414,91 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)(
         exchangeToken(tokenRequest({ ...input, redirect_uri: `${callback}/` })),
       ).rejects.toMatchObject({ code: "invalid_grant" });
     });
+    it("exchanges resource-bound credentials when token requests omit resource", async () => {
+      const input = {
+        grant_type: "authorization_code",
+        code: await code(),
+        redirect_uri: callback,
+        code_verifier: verifier,
+      };
+      const firstRequest = tokenRequest(input);
+      const firstParams = new URLSearchParams(await firstRequest.text());
+      firstParams.delete("resource");
+      const firstResponse = await tokenRoute(
+        new Request(firstRequest.url, {
+          method: "POST",
+          headers: firstRequest.headers,
+          body: firstParams,
+        }),
+      );
+      expect(firstResponse.status).toBe(200);
+      const first = await firstResponse.json();
+      expect((await authenticate(withBearer(first.access_token))).id).toBe(
+        parent,
+      );
+      const refreshRequest = tokenRequest({
+        grant_type: "refresh_token",
+        refresh_token: first.refresh_token,
+      });
+      const refreshParams = new URLSearchParams(await refreshRequest.text());
+      refreshParams.delete("resource");
+      const next = await tokenRoute(
+        new Request(refreshRequest.url, {
+          method: "POST",
+          headers: refreshRequest.headers,
+          body: refreshParams,
+        }),
+      );
+      expect(next.status).toBe(200);
+      expect((await next.json()).refresh_token).not.toBe(first.refresh_token);
+    });
+    it("accepts equivalent scope ordering but rejects added scopes", async () => {
+      const result = await exchangeToken(
+        tokenRequest({
+          grant_type: "authorization_code",
+          code: await code(),
+          redirect_uri: callback,
+          code_verifier: verifier,
+          scope: "mcp:write mcp:read",
+        }),
+      );
+      expect(result).toHaveProperty("access_token");
+      await expect(
+        exchangeToken(
+          tokenRequest({
+            grant_type: "authorization_code",
+            code: await code({ scope: "mcp:read" }),
+            redirect_uri: callback,
+            code_verifier: verifier,
+            scope: "mcp:read mcp:write",
+          }),
+        ),
+      ).rejects.toMatchObject({ code: "invalid_scope" });
+    });
+    it("logs only safe error codes for failed token exchanges", async () => {
+      const log = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const response = await tokenRoute(
+          tokenRequest({
+            grant_type: "authorization_code",
+            code: "z".repeat(43),
+            redirect_uri: callback,
+            code_verifier: verifier,
+            client_secret: "test-secret-not-for-logs",
+          }),
+        );
+        expect(response.status).toBe(401);
+        expect(log).toHaveBeenCalledWith("mcp_oauth_token_failure", {
+          error: "invalid_client",
+        });
+        expect(JSON.stringify(log.mock.calls)).not.toContain(
+          "test-secret-not-for-logs",
+        );
+        expect(JSON.stringify(log.mock.calls)).not.toContain(verifier);
+      } finally {
+        log.mockRestore();
+      }
+    });
     it("rejects duplicate parameters and expires authorization codes", async () => {
       const credential = await code();
       await db().query(

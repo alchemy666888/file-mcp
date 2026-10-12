@@ -29,6 +29,12 @@ Verified the updated source with PostgreSQL 17 and mocked Google APIs:
 
 The OAuth database migration was exercised against an existing initial schema. No production database, Google account, Vercel environment, or live ChatGPT connection was used. ChatGPT account setup and live acceptance remain necessary after deployment; see [the setup guide](chatgpt-setup.md).
 
+## OAuth exchange compatibility patch — 12 October 2026
+
+The patch accepts omission of `resource` only at token/refresh exchange, using the grant's existing single-resource binding; authorization still requires the exact resource, and explicitly wrong/empty targets remain rejected. Equivalent scope order is accepted without adding permissions. Failed token exchanges emit a fixed error code without logging request bodies, credentials, or authorization codes.
+
+Verified 60 service/security/OAuth tests and 3 Chromium tests, plus the production build, TypeScript, ESLint, and formatting. New regressions cover omitted resource on code/refresh exchange, reversed scope ordering, attempted scope expansion, and secret-free diagnostics. These changes address reproduced interoperability defects; they do not establish the cause of a particular live ChatGPT callback failure without the token/MCP request logs.
+
 ## Reproduce service tests
 
 Run `pnpm test` for unit tests. PostgreSQL integration tests are skipped unless `TEST_DATABASE_URL` is supplied. Provision an isolated database, then run:

@@ -409,7 +409,11 @@ export async function exchangeToken(request: Request) {
   const params = await formParams(request);
   return transaction(async (connection) => {
     const client = await authenticateClient(request, params, connection);
-    if (params.get("resource") !== resourceUrl())
+    // A code/refresh token is already bound to exactly one resource. Some
+    // OAuth clients omit resource during exchange; never infer an audience
+    // from client input or accept an explicitly different target.
+    const requestedResource = params.get("resource");
+    if (requestedResource !== null && requestedResource !== resourceUrl())
       throw new OAuthError("invalid_target");
     const type = params.get("grant_type");
     if (type !== "authorization_code" && type !== "refresh_token")
@@ -432,10 +436,21 @@ export async function exchangeToken(request: Request) {
       [found.rows[0].grant_id, client.id],
     );
     const grant = grantResult.rows[0];
-    if (!grant || grant.resource !== params.get("resource"))
+    if (!grant || grant.resource !== resourceUrl())
       throw new OAuthError("invalid_grant");
-    if (params.has("scope") && params.get("scope") !== grant.scope)
-      throw new OAuthError("invalid_scope");
+    if (params.has("scope")) {
+      // OAuth scopes are sets, not ordered strings. No new scope is granted.
+      const requestedScopes = [
+        ...new Set((params.get("scope") ?? "").split(" ")),
+      ]
+        .sort()
+        .join(" ");
+      const grantedScopes = [...new Set(grant.scope.split(" "))]
+        .sort()
+        .join(" ");
+      if (requestedScopes !== grantedScopes)
+        throw new OAuthError("invalid_scope");
+    }
     if (type === "authorization_code") {
       const result = await connection.query<{
         challenge: string;
